@@ -5,6 +5,35 @@ set -o pipefail
 
 source ./env.sh
 
+# Deletes the backups of the database under the prefix last modified more than
+# that many days ago.
+remove_old_backups() {
+  local prefix=$1
+  local keep_days=$2
+  local sec=$((86400*keep_days))
+  local date_from_remove=$(date -d "@$(($(date +%s) - sec))" +%Y-%m-%d)
+  local backups_query="Contents[?LastModified<='${date_from_remove} 00:00:00'].{Key: Key}"
+
+  echo "Removing old backups from $S3_BUCKET/$prefix..."
+  aws $aws_args s3api list-objects \
+    --bucket "${S3_BUCKET}" \
+    --prefix "${prefix}/${POSTGRES_DATABASE}_" \
+    --query "${backups_query}" \
+    --output text \
+    | sed '/^None$/d' \
+    | xargs -n1 -t -I 'KEY' aws $aws_args s3 rm s3://"${S3_BUCKET}"/'KEY'
+  echo "Removal complete."
+}
+
+# Copies the backup just uploaded under the prefix, from S3 to S3: no new dump
+# nor upload.
+copy_backup() {
+  local prefix=$1
+
+  echo "Copying backup to $S3_BUCKET/$prefix..."
+  aws $aws_args s3 cp "$s3_uri" "s3://${S3_BUCKET}/${prefix}/${s3_uri##*/}"
+}
+
 echo "Creating backup of $POSTGRES_DATABASE database..."
 pg_dump --format=custom \
         -h $POSTGRES_HOST \
@@ -36,16 +65,39 @@ rm "$local_file"
 echo "Backup complete."
 
 if [ -n "$BACKUP_KEEP_DAYS" ]; then
-  sec=$((86400*BACKUP_KEEP_DAYS))
-  date_from_remove=$(date -d "@$(($(date +%s) - sec))" +%Y-%m-%d)
-  backups_query="Contents[?LastModified<='${date_from_remove} 00:00:00'].{Key: Key}"
+  remove_old_backups "$S3_PREFIX" "$BACKUP_KEEP_DAYS"
+fi
 
-  echo "Removing old backups from $S3_BUCKET..."
-  aws $aws_args s3api list-objects \
+# A weekly copy when the last one is at least 6.5 days old: half a day of slack
+# for the time the dump takes, so that a daily schedule copies every 7 days.
+if [ -n "$S3_WEEKLY_PREFIX" ]; then
+  since=$(date -u -d "@$(($(date +%s) - 561600))" +%Y-%m-%dT%H:%M:%S)
+  recent_copies=$(aws $aws_args s3api list-objects \
     --bucket "${S3_BUCKET}" \
-    --prefix "${S3_PREFIX}" \
-    --query "${backups_query}" \
-    --output text \
-    | xargs -n1 -t -I 'KEY' aws $aws_args s3 rm s3://"${S3_BUCKET}"/'KEY'
-  echo "Removal complete."
+    --prefix "${S3_WEEKLY_PREFIX}/${POSTGRES_DATABASE}_" \
+    --query "Contents[?LastModified>='${since}'].Key" \
+    --output text)
+
+  if [ -z "$recent_copies" ] || [ "$recent_copies" = "None" ]; then
+    copy_backup "$S3_WEEKLY_PREFIX"
+  fi
+
+  if [ -n "$WEEKLY_BACKUP_KEEP_DAYS" ]; then
+    remove_old_backups "$S3_WEEKLY_PREFIX" "$WEEKLY_BACKUP_KEEP_DAYS"
+  fi
+fi
+
+# A monthly copy of the first backup of each month, even when the 1st was
+# missed.
+if [ -n "$S3_MONTHLY_PREFIX" ]; then
+  month=$(echo "$timestamp" | cut -c1-7)
+  month_copies=$(aws $aws_args s3 ls "s3://${S3_BUCKET}/${S3_MONTHLY_PREFIX}/${POSTGRES_DATABASE}_${month}" || true)
+
+  if [ -z "$month_copies" ]; then
+    copy_backup "$S3_MONTHLY_PREFIX"
+  fi
+
+  if [ -n "$MONTHLY_BACKUP_KEEP_DAYS" ]; then
+    remove_old_backups "$S3_MONTHLY_PREFIX" "$MONTHLY_BACKUP_KEEP_DAYS"
+  fi
 fi
