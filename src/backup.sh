@@ -26,12 +26,20 @@ remove_old_backups() {
 }
 
 # Copies the backup just uploaded under the prefix, from S3 to S3: no new dump
-# nor upload.
+# nor upload. A single CopyObject (up to 5 GB): `aws s3 cp` copies larger than
+# 8 MB in parts, each with CopySourceIfMatch, which some S3-compatible
+# providers (OVH) refuse as PreconditionFailed.
 copy_backup() {
   local prefix=$1
+  local key="${s3_uri#s3://${S3_BUCKET}/}"
 
   echo "Copying backup to $S3_BUCKET/$prefix..."
-  aws $aws_args s3 cp "$s3_uri" "s3://${S3_BUCKET}/${prefix}/${s3_uri##*/}"
+  aws $aws_args s3api copy-object \
+    --bucket "${S3_BUCKET}" \
+    --copy-source "${S3_BUCKET}/${key}" \
+    --key "${prefix}/${key##*/}" \
+    > /dev/null
+  echo "Copy complete."
 }
 
 echo "Creating backup of $POSTGRES_DATABASE database..."
