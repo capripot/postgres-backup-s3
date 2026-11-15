@@ -33,8 +33,23 @@ services:
 - The `SCHEDULE` variable determines backup frequency. See go-cron schedules documentation [here](http://godoc.org/github.com/robfig/cron#hdr-Predefined_schedules). Omit to run the backup immediately and then exit.
 - If `PASSPHRASE` is provided, the backup will be encrypted using GPG.
 - Run `docker exec <container name> sh backup.sh` to trigger a backup ad-hoc.
-- If `BACKUP_KEEP_DAYS` is set, backups older than this many days will be deleted from S3.
+- If `BACKUP_KEEP_DAYS` is set, backups of `POSTGRES_DATABASE` under `S3_PREFIX` older than this many days will be deleted from S3.
 - Set `S3_ENDPOINT` only if you're using a non-AWS S3-compatible storage provider.
+
+### Weekly and monthly copies
+On top of the regular backups, some can be kept longer under other prefixes. They are copied on S3 from the backup just uploaded: no extra `pg_dump` or upload.
+
+```yaml
+      S3_WEEKLY_PREFIX: weekly        # optional
+      WEEKLY_BACKUP_KEEP_DAYS: 31     # optional, kept indefinitely when omitted
+      S3_MONTHLY_PREFIX: monthly      # optional
+      MONTHLY_BACKUP_KEEP_DAYS: 365   # optional, kept indefinitely when omitted
+```
+
+- If `S3_WEEKLY_PREFIX` is set, a backup is copied there when the last copy is at least 6.5 days old (half a day of slack for the time the dump takes): with a daily `SCHEDULE`, one every 7 days.
+- If `S3_MONTHLY_PREFIX` is set, the first backup of each month is copied there, even when the backup of the 1st was missed.
+- `WEEKLY_BACKUP_KEEP_DAYS` and `MONTHLY_BACKUP_KEEP_DAYS` delete the copies older than this many days, like `BACKUP_KEEP_DAYS`.
+- To restore a copy, point `S3_PREFIX` at its prefix: `docker exec -e S3_PREFIX=monthly <container name> sh restore.sh <timestamp>`.
 
 ## Restore
 > [!CAUTION]
